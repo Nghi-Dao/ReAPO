@@ -1,0 +1,6 @@
+- name: "multi_attempt"
+  _target_: multi_attempt_agent.MultiAttemptGRPO
+
+
+- name: "async_multi_attempt"
+  _target_: async_multi_attempt_agent.FullyAsyncMultiAttemptGRPO
