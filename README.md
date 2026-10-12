@@ -60,9 +60,9 @@ python data_prep/platinum.py       # ~/data/gsm8k-platinum/test.parquet
 
 | Script | Source on the Hub | Used as |
 |---|---|---|
-| `polaris.py` | `POLARIS-Project/Polaris-Dataset-53K` | training (Qwen3) |
-| `gsm8k.py` | `openai/gsm8k` | training (small models) |
-| `platinum.py` | `madrylab/gsm8k-platinum` | evaluation (small models) |
+| `polaris.py` | `POLARIS-Project/Polaris-Dataset-53K` | training |
+| `gsm8k.py` | `openai/gsm8k` | training |
+| `platinum.py` | `madrylab/gsm8k-platinum` | evaluation |
 | `aime24.py` | `math-ai/aime24` | evaluation |
 | `aime25.py` | `math-ai/aime25` | evaluation |
 | `hmmt25.py` | `MathArena/hmmt_feb_2025` | evaluation |
