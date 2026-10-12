@@ -2,7 +2,7 @@ import re
 from src.reward import compute_score as base_compute_score
 from collections import Counter
 
-def compute_decay_reward(data_source, solution_str, ground_truth, extra_info):
+def compute_reward(data_source, solution_str, ground_truth, extra_info):
     
     trial_reward = extra_info.get('trial_reward', {})
     

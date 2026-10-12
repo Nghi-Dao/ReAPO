@@ -68,8 +68,8 @@ DATASET_CONFIGS = {
 
 
 # Match the validation decoding configuration used by commands/qwen1.7b.sh.
-# Phase 1 gets its attempt count from --max_attempts. The deep pass@k phase is
-# intentionally pinned to one attempt so its samples are independent rollouts.
+# Phase 1 and Phase 2 get separate attempt counts from their CLI options.
+# Phase 2 defaults to one attempt so pass@k samples are independent rollouts.
 EVAL_TEMPERATURE = 0.6
 EVAL_TOP_P = 0.95
 EVAL_TOP_K = -1
@@ -77,6 +77,8 @@ EVAL_DO_SAMPLE = True
 PASS_AT_K_MAX_ATTEMPTS = 1
 EVAL_RETRY_PROMPT = "Your answer is wrong. Reflect on your previous answer and try something else."
 DEFAULT_TARGET_STEP = 1040
+DEFAULT_MAX_PROMPT_LENGTH = 1024
+DEFAULT_RESPONSE_LENGTH = 4096
 MAX_VALIDATION_RESPONSES_PER_BATCH = 8192
 # This controls the small logger table only. Every generation is separately
 # written as JSONL beneath eval_outputs via trainer.validation_data_dir.
@@ -89,6 +91,14 @@ def _validate_max_attempts(max_attempts: int) -> int:
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
     return max_attempts
+
+
+def _validate_response_length(response_length: int) -> int:
+    if response_length < 1:
+        raise ValueError(
+            f"response_length must be at least 1, got {response_length}"
+        )
+    return response_length
 
 
 def _jsonable(value):
@@ -157,6 +167,7 @@ def _evaluation_signature(
     validation_paths: List[str],
     n_samples: int,
     max_attempts: int,
+    response_length: int,
 ) -> dict:
     return {
         "schema_version": RESUME_SCHEMA_VERSION,
@@ -174,9 +185,9 @@ def _evaluation_signature(
         "top_k": EVAL_TOP_K,
         "do_sample": EVAL_DO_SAMPLE,
         "retry_prompt": EVAL_RETRY_PROMPT,
-        "max_prompt_length": 1024,
-        "max_response_length": 4096,
-        "reward_function": "src/decay_reward.py:compute_decay_reward",
+        "max_prompt_length": DEFAULT_MAX_PROMPT_LENGTH,
+        "max_response_length": int(response_length),
+        "reward_function": "src/multi_attempt_reward.py:compute_reward",
     }
 
 
@@ -276,6 +287,7 @@ def _execute_or_resume_eval_pass(
     phase: str,
     checkpoint: dict,
     max_attempts: int,
+    response_length: int,
     resume: bool,
 ) -> Tuple[dict, bool]:
     signature = _evaluation_signature(
@@ -286,6 +298,7 @@ def _execute_or_resume_eval_pass(
         validation_paths=val_file_list,
         n_samples=n_samples,
         max_attempts=max_attempts,
+        response_length=response_length,
     )
 
     if resume:
@@ -690,6 +703,10 @@ def _build_single_trainer(pipeline_spec: dict, session: _EvalTaskSession) -> Ray
     initial_model_dir = pipeline_spec["checkpoint_specs"][0]["merged_dir"]
     sample_val_files = pipeline_spec["sample_val_files"]
     max_attempts = _validate_max_attempts(int(pipeline_spec["max_attempts"]))
+    response_length = _validate_response_length(
+        int(pipeline_spec["response_length"])
+    )
+    max_model_length = DEFAULT_MAX_PROMPT_LENGTH + response_length
 
     _set_eval_agent_environment(max_attempts)
     os.environ["WANDB_MODE"] = "disabled"
@@ -704,10 +721,10 @@ def _build_single_trainer(pipeline_spec: dict, session: _EvalTaskSession) -> Ray
         "data.filter_overlong_prompts=True",
         "data.truncation=error",
         "data.val_batch_size=256",
-        "data.max_prompt_length=1024",
-        "data.max_response_length=4096",
-        f"reward.custom_reward_function.path={os.path.abspath('./src/decay_reward.py')}",
-        "reward.custom_reward_function.name=compute_decay_reward",
+        f"data.max_prompt_length={DEFAULT_MAX_PROMPT_LENGTH}",
+        f"data.max_response_length={response_length}",
+        f"reward.custom_reward_function.path={os.path.abspath('./src/multi_attempt_reward.py')}",
+        "reward.custom_reward_function.name=compute_reward",
         "reward.reward_manager.name=naive",
         "reward.num_workers=32",
         f"actor_rollout_ref.model.path={initial_model_dir}",
@@ -721,12 +738,12 @@ def _build_single_trainer(pipeline_spec: dict, session: _EvalTaskSession) -> Ray
         "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16",
         "actor_rollout_ref.rollout.name=vllm",
         "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
-        "actor_rollout_ref.rollout.gpu_memory_utilization=0.6",
+        "actor_rollout_ref.rollout.gpu_memory_utilization=0.3",
         f"actor_rollout_ref.rollout.val_kwargs.temperature={EVAL_TEMPERATURE}",
         f"actor_rollout_ref.rollout.val_kwargs.top_p={EVAL_TOP_P}",
         f"actor_rollout_ref.rollout.val_kwargs.top_k={EVAL_TOP_K}",
         f"actor_rollout_ref.rollout.val_kwargs.do_sample={str(EVAL_DO_SAMPLE).lower()}",
-        "++actor_rollout_ref.max_model_len=5120",
+        f"++actor_rollout_ref.max_model_len={max_model_length}",
         "actor_rollout_ref.rollout.multi_turn.enable=True",
         f"actor_rollout_ref.rollout.agent.agent_loop_config_path={os.path.abspath('./src/custom_agents.yaml')}",
         "++actor_rollout_ref.rollout.agent.default_agent_loop=multi_attempt",
@@ -745,10 +762,10 @@ def _build_single_trainer(pipeline_spec: dict, session: _EvalTaskSession) -> Ray
     with initialize_config_module(config_module="verl.trainer.config", version_base=None):
         config = compose(config_name="ppo_trainer", overrides=overrides)
 
-    expected_reward_path = os.path.abspath("./src/decay_reward.py")
+    expected_reward_path = os.path.abspath("./src/multi_attempt_reward.py")
     resolved_reward_path = os.path.abspath(str(config.reward.custom_reward_function.path))
     resolved_reward_name = str(config.reward.custom_reward_function.name)
-    if resolved_reward_path != expected_reward_path or resolved_reward_name != "compute_decay_reward":
+    if resolved_reward_path != expected_reward_path or resolved_reward_name != "compute_reward":
         raise RuntimeError(
             "The async reward loop is not configured with the custom scorer: "
             f"resolved_path={resolved_reward_path!r}, resolved_name={resolved_reward_name!r}"
@@ -1080,6 +1097,7 @@ def _run_phase1(
     event_reporter = pipeline_spec.get("event_reporter")
     resume = bool(pipeline_spec.get("resume", True))
     max_attempts = int(pipeline_spec["max_attempts"])
+    response_length = int(pipeline_spec["response_length"])
 
     current_step = None
     phase1_results = []
@@ -1128,13 +1146,19 @@ def _run_phase1(
                 validation_paths=validation_paths,
                 n_samples=samples,
                 max_attempts=max_attempts,
+                response_length=response_length,
             )
             manifest_exists = os.path.isfile(os.path.join(output_dir, RESUME_MANIFEST_NAME))
             saved_metrics = _load_completed_eval(output_dir, signature) if resume else None
             # Only use raw-JSONL recovery for outputs made before manifests
             # existed. If a manifest exists but is incompatible, rerun instead
             # of bypassing its configuration/checkpoint safety checks.
-            if saved_metrics is None and resume and not manifest_exists:
+            if (
+                saved_metrics is None
+                and resume
+                and not manifest_exists
+                and response_length == DEFAULT_RESPONSE_LENGTH
+            ):
                 saved_metrics = _recover_metrics_from_existing_jsonl(
                     trainer=trainer,
                     val_file_list=validation_paths,
@@ -1165,6 +1189,7 @@ def _run_phase1(
                     phase="phase1",
                     checkpoint=checkpoint,
                     max_attempts=max_attempts,
+                    response_length=response_length,
                     resume=False,
                 )
                 step_metrics.update(metrics)
@@ -1203,21 +1228,26 @@ def _run_phase2(
 ) -> List[dict]:
     checkpoints = pipeline_spec["checkpoint_specs"]
     datasets = pipeline_spec["datasets"]
-    default_main_samples = pipeline_spec["default_main_samples"]
+    main_samples_override = pipeline_spec["phase2_samples"]
     eval_outputs_folder = pipeline_spec["eval_outputs_folder"]
     event_reporter = pipeline_spec.get("event_reporter")
     resume = bool(pipeline_spec.get("resume", True))
+    response_length = int(pipeline_spec["response_length"])
+    max_attempts = _validate_max_attempts(int(pipeline_spec["max_attempts"]))
 
     target_checkpoint = next(checkpoint for checkpoint in checkpoints if checkpoint["step"] == target_step)
     print(
         f"\n=== PHASE 2: Deep Pass@k Evaluation for Target Step {target_step} "
-        f"(max_attempts={PASS_AT_K_MAX_ATTEMPTS}) ==="
+        f"(max_attempts={max_attempts}) ==="
     )
     phase2_groups_by_samples = {}
     for dataset_name, validation_path in datasets.items():
         if not os.path.exists(validation_path):
             continue
-        samples = DATASET_CONFIGS.get(dataset_name, {}).get("main_samples", default_main_samples)
+        if main_samples_override is not None:
+            samples = int(main_samples_override)
+        else:
+            samples = DATASET_CONFIGS.get(dataset_name, {}).get("main_samples", 4096)
         phase2_groups_by_samples.setdefault(samples, []).append((dataset_name, validation_path))
 
     phase2_results = []
@@ -1251,11 +1281,18 @@ def _run_phase2(
             dataset_names=dataset_names,
             validation_paths=validation_paths,
             n_samples=samples,
-            max_attempts=PASS_AT_K_MAX_ATTEMPTS,
+            max_attempts=max_attempts,
+            response_length=response_length,
         )
         manifest_exists = os.path.isfile(os.path.join(output_dir, RESUME_MANIFEST_NAME))
         saved_metrics = _load_completed_eval(output_dir, signature) if resume else None
-        if saved_metrics is None and resume and not manifest_exists:
+        if (
+            saved_metrics is None
+            and resume
+            and not manifest_exists
+            and response_length == DEFAULT_RESPONSE_LENGTH
+            and max_attempts == PASS_AT_K_MAX_ATTEMPTS
+        ):
             saved_metrics = _recover_metrics_from_existing_jsonl(
                 trainer=trainer,
                 val_file_list=validation_paths,
@@ -1284,7 +1321,8 @@ def _run_phase2(
                 output_dir=output_dir,
                 phase="phase2",
                 checkpoint=target_checkpoint,
-                max_attempts=PASS_AT_K_MAX_ATTEMPTS,
+                max_attempts=max_attempts,
+                response_length=response_length,
                 resume=False,
             )
         phase2_results.append(
@@ -1319,11 +1357,6 @@ def run_single_trainer_eval_task(pipeline_spec: dict) -> dict:
         raise ValueError(f"Unknown phase_mode: {phase_mode!r}")
 
     max_attempts = _validate_max_attempts(int(pipeline_spec["max_attempts"]))
-    if phase_mode in {"both", "phase2"} and max_attempts != PASS_AT_K_MAX_ATTEMPTS:
-        raise ValueError(
-            f"{phase_mode} must run with max_attempts={PASS_AT_K_MAX_ATTEMPTS}, "
-            f"got {max_attempts}"
-        )
     _set_eval_agent_environment(max_attempts)
 
     task_spec = pipeline_spec
@@ -1654,17 +1687,31 @@ def evaluate_pipeline(
     run_name: str,
     dataset_paths: List[str],
     default_step_samples: int = 256,
-    default_main_samples: int = 4096,
+    phase2_samples: Optional[int] = None,
     wandb_project: str = "r-grpo_eval",
     num_gpus: int = 1,
     target_step: Optional[int] = DEFAULT_TARGET_STEP,
     max_attempts: int = 1,
+    phase2_max_attempts: int = PASS_AT_K_MAX_ATTEMPTS,
+    response_length: int = DEFAULT_RESPONSE_LENGTH,
+    skip_phase1: bool = False,
     resume: bool = True,
 ) -> None:
     phase1_max_attempts = _validate_max_attempts(max_attempts)
-    phase2_max_attempts = PASS_AT_K_MAX_ATTEMPTS
-    restart_for_phase2 = phase1_max_attempts != phase2_max_attempts
-    _set_eval_agent_environment(phase1_max_attempts)
+    phase2_max_attempts = _validate_max_attempts(phase2_max_attempts)
+    response_length = _validate_response_length(response_length)
+    if phase2_samples is not None and phase2_samples < 1:
+        raise ValueError(
+            "phase2_samples must be at least 1 when provided, "
+            f"got {phase2_samples}"
+        )
+    restart_for_phase2 = (
+        not skip_phase1 and phase1_max_attempts != phase2_max_attempts
+    )
+    initial_max_attempts = (
+        phase2_max_attempts if skip_phase1 else phase1_max_attempts
+    )
+    _set_eval_agent_environment(initial_max_attempts)
 
     absolute_verl_dir = os.path.abspath(verl_dir)
     if absolute_verl_dir not in sys.path:
@@ -1679,6 +1726,20 @@ def evaluate_pipeline(
     checkpoints = get_sorted_checkpoints(checkpoint_folder)
     if not checkpoints:
         raise FileNotFoundError(f"No global_step_* folders found inside {checkpoint_folder}")
+    discovered_steps = [step for step, _ in checkpoints]
+    if target_step is not None and target_step not in discovered_steps:
+        raise ValueError(
+            f"Requested target step {target_step} was not found. "
+            f"Available steps: {discovered_steps}"
+        )
+    if skip_phase1:
+        if target_step is None:
+            raise ValueError("--skip_phase1 requires an explicit --target_step")
+        checkpoints = [
+            (step, checkpoint_dir)
+            for step, checkpoint_dir in checkpoints
+            if step == target_step
+        ]
 
     datasets = dict(parse_dataset_info(path) for path in dataset_paths)
     existing_datasets = [path for path in datasets.values() if os.path.exists(path)]
@@ -1692,15 +1753,11 @@ def evaluate_pipeline(
         merged_dir = merge_verl_checkpoint(actor_dir, requested_merged_dir)
         checkpoint_specs.append({"step": step, "merged_dir": merged_dir})
 
-    available_steps = [checkpoint["step"] for checkpoint in checkpoint_specs]
-    if target_step is not None and target_step not in available_steps:
-        raise ValueError(f"Requested target step {target_step} was not found. Available steps: {available_steps}")
-
     if not ray.is_initialized():
         ray_runtime_env = get_ppo_ray_runtime_env()
         ray_runtime_env.setdefault("env_vars", {}).update(
             {
-                "MAX_ATTEMPTS": str(phase1_max_attempts),
+                "MAX_ATTEMPTS": str(initial_max_attempts),
                 "VERL_RETRY_PROMPT": EVAL_RETRY_PROMPT,
             }
         )
@@ -1714,12 +1771,13 @@ def evaluate_pipeline(
             "checkpoint_folder": checkpoint_folder,
             "target_step": target_step,
             "default_step_samples": default_step_samples,
-            "default_main_samples": default_main_samples,
+            "phase2_samples": phase2_samples,
             "datasets": list(datasets),
             "gpus": num_gpus,
             "single_trainer": not restart_for_phase2,
             "trainer_boot_count": 2 if restart_for_phase2 else 1,
             "restart_trainer_for_phase2": restart_for_phase2,
+            "skip_phase1": skip_phase1,
             "gpu_memory_utilization": 0.3,
             "validation_temperature": EVAL_TEMPERATURE,
             "validation_top_p": EVAL_TOP_P,
@@ -1728,6 +1786,9 @@ def evaluate_pipeline(
             "max_attempts": phase1_max_attempts,
             "phase1_max_attempts": phase1_max_attempts,
             "phase2_max_attempts": phase2_max_attempts,
+            "max_prompt_length": DEFAULT_MAX_PROMPT_LENGTH,
+            "response_length": response_length,
+            "max_model_length": DEFAULT_MAX_PROMPT_LENGTH + response_length,
             "max_validation_responses_per_batch": MAX_VALIDATION_RESPONSES_PER_BATCH,
             "trainer_log_val_generations": LOG_VAL_GENERATIONS,
             "resume_completed_evaluations": resume,
@@ -1744,9 +1805,10 @@ def evaluate_pipeline(
             "datasets": datasets,
             "checkpoint_specs": checkpoint_specs,
             "default_step_samples": default_step_samples,
-            "default_main_samples": default_main_samples,
+            "phase2_samples": phase2_samples,
             "eval_outputs_folder": eval_outputs_folder,
             "target_step": target_step,
+            "response_length": response_length,
             "event_reporter": event_reporter,
             "resume": resume,
         }
@@ -1770,7 +1832,26 @@ def evaluate_pipeline(
                 }
             ).remote(task_spec)
 
-        if restart_for_phase2:
+        if skip_phase1:
+            print(
+                "[+] Skipping Phase 1. Starting deep Phase 2 evaluation at "
+                f"target step {target_step}."
+            )
+            phase2_ref = launch_eval_task(
+                "phase2",
+                phase2_max_attempts,
+                selected_step=target_step,
+            )
+            phase2_result, live_state = _wait_for_eval_with_live_wandb(
+                phase2_ref,
+                event_reporter,
+            )
+            result = {
+                "phase1_results": [],
+                "selected_target_step": target_step,
+                "phase2_results": phase2_result["phase2_results"],
+            }
+        elif restart_for_phase2:
             print(
                 "[+] Phase 1 will use "
                 f"max_attempts={phase1_max_attempts}. Phase 2 requires "
@@ -1802,7 +1883,11 @@ def evaluate_pipeline(
                 "phase2_results": phase2_result["phase2_results"],
             }
         else:
-            print("[+] Both phases use max_attempts=1; reusing one trainer for the entire run.")
+            print(
+                "[+] Both phases use "
+                f"max_attempts={phase1_max_attempts}; reusing one trainer "
+                "for the entire run."
+            )
             task_ref = launch_eval_task("both", phase1_max_attempts)
             result, live_state = _wait_for_eval_with_live_wandb(task_ref, event_reporter)
 
@@ -1866,12 +1951,43 @@ if __name__ == "__main__":
     )
     parser.add_argument("--val_files", nargs="+", default=DEFAULT_DATASET_PATHS)
     parser.add_argument("--default_step_samples", type=int, default=256)
-    parser.add_argument("--default_main_samples", type=int, default=4096)
+    parser.add_argument(
+        "--phase2_samples",
+        "--phase2-samples",
+        "--default_main_samples",
+        dest="phase2_samples",
+        type=int,
+        default=None,
+        help=(
+            "Force the Phase 2 sample count per prompt for every selected dataset. "
+            "When omitted, each dataset uses DATASET_CONFIGS."
+        ),
+    )
     parser.add_argument("--gpus", type=int, default=1)
+    parser.add_argument(
+        "--response_length",
+        "--response-length",
+        dest="response_length",
+        type=int,
+        default=DEFAULT_RESPONSE_LENGTH,
+        help=(
+            "Maximum generated tokens per response "
+            f"(default: {DEFAULT_RESPONSE_LENGTH})."
+        ),
+    )
     parser.add_argument(
         "--no_resume",
         action="store_true",
         help="Ignore saved completion manifests and rerun every evaluation pass.",
+    )
+    parser.add_argument(
+        "--skip_phase1",
+        "--skip-phase1",
+        action="store_true",
+        help=(
+            "Skip checkpoint-vs-step evaluation and run only the deep Phase 2 "
+            "evaluation at --target_step."
+        ),
     )
     parser.add_argument(
         "--max_attempts",
@@ -1879,9 +1995,17 @@ if __name__ == "__main__":
         dest="max_attempts",
         type=int,
         default=1,
+        help="Maximum attempts for Phase 1 checkpoint-vs-step evaluation (default: 1).",
+    )
+    parser.add_argument(
+        "--phase2_max_attempts",
+        "--phase2-max-attempts",
+        dest="phase2_max_attempts",
+        type=int,
+        default=PASS_AT_K_MAX_ATTEMPTS,
         help=(
-            "Maximum attempts for checkpoint-vs-step evaluation (default: 1). "
-            "The target-step pass@k phase always uses 1."
+            "Maximum attempts for the target-step Phase 2 evaluation "
+            f"(default: {PASS_AT_K_MAX_ATTEMPTS})."
         ),
     )
     args = parser.parse_args()
@@ -1893,10 +2017,14 @@ if __name__ == "__main__":
         run_name=os.path.basename(os.path.normpath(args.checkpoint_dir)),
         dataset_paths=args.val_files,
         default_step_samples=args.default_step_samples,
-        default_main_samples=args.default_main_samples,
+        phase2_samples=args.phase2_samples,
         wandb_project=args.wandb_project,
         num_gpus=args.gpus,
         target_step=args.target_step,
         max_attempts=args.max_attempts,
+        phase2_max_attempts=args.phase2_max_attempts,
+        response_length=args.response_length,
+        skip_phase1=args.skip_phase1,
         resume=not args.no_resume,
     )
+

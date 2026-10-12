@@ -228,7 +228,7 @@ def compute_multi_attempt_grpo_advantage(
     Custom GRPO Advantage Estimator for multi-attempt rollouts.
     Treats each individual attempt across all rollouts in a group as an independent sample.
     - If an attempt is successful, previous failed attempts in that sequence receive
-      rewards in decaying powers of 2 (e.g., 0.5, 0.25, etc.) tracing backwards.
+      rewards of 0.0
     - If the sequence fails, previous attempts receive 0.0 and the final path receives the raw sum.
     """
     advantages = torch.zeros_like(token_level_rewards)
@@ -239,7 +239,6 @@ def compute_multi_attempt_grpo_advantage(
 
     with torch.no_grad():
         for g in unique_groups:
-            # Find row indices in the batch belonging to the current prompt group
             group_row_indices = np.where(index == g)[0]
 
             # Step 1: Collect all attempts and scores across all rollouts in this group
@@ -261,10 +260,6 @@ def compute_multi_attempt_grpo_advantage(
 
                 for attempt_id in unique_attempts:
                     if final_score > 0:
-                        # Success Reward Decay Rule:
-                        # final attempt (attempt_id == max_attempt) -> final_score * 1.0
-                        # 1 attempt prior (max_attempt - 1)        -> final_score * 0.5
-                        # 2 attempts prior (max_attempt - 2)       -> final_score * 0.25
                         distance = max_attempt - attempt_id
                         
                         if distance == 0:
@@ -311,10 +306,8 @@ def compute_multi_attempt_grpo_advantage(
                 else:
                     adv_scalar = score - group_mean
 
-                # Assign the scalar advantage to the exact tokens corresponding to this attempt
                 advantages[i, mask_row == attempt_id] = adv_scalar
 
-    # In outcome-driven estimators, advantages and returns match
     return advantages, advantages
 
 

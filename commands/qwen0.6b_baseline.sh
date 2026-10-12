@@ -1,74 +1,47 @@
 #!/bin/bash
-#SBATCH --job-name=r-grpo_base
-#SBATCH --partition=beta
-#SBATCH --nodes=1
-#SBATCH --qos=long
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=144
-#SBATCH --time=7-00:00:00
-#SBATCH --output=logs/slurm-%j.out
-#SBATCH --error=logs/slurm-%j.err
-
-
-
-#export WANDB_RUN_ID="5opv9xg2"
-#export WANDB_RESUME="must"
-
 
 export PROJECT_ROOT=$(pwd)
 export PYTHONPATH=$(pwd)/src:$PYTHONPATH
 
+source venv/bin/activate
 
-export VENV_LIB="${PROJECT_ROOT}/beta_venv/lib/python3.12/site-packages"
-export CUDA_HOME="$VENV_LIB/nvidia/cu13"
-export PATH="${PROJECT_ROOT}/beta_venv/bin:$CUDA_HOME/bin:$PATH"
-export CPATH="$CUDA_HOME/include:$CPATH"
-export LD_LIBRARY_PATH="$VENV_LIB/torch/lib:$VENV_LIB/nvidia/cuda_runtime/lib:$CUDA_HOME/lib:$LD_LIBRARY_PATH"
-
-
-
-
-export MODEL_PATH="Qwen/Qwen3-4B-Base"
+export MODEL_PATH="Qwen/Qwen3-0.6B-Base"
 export MAX_ATTEMPTS=1
 export VERL_RETRY_PROMPT="Your answer is wrong. Reflect on your previous answer and try something else."
 
-export RESPONSE_LEN=4096
+export RESPONSE_LEN=2048
 export PROMPT_LEN=1024
 export ROLLOUT_NUM=16
 
-export SEED=42
-
-# 1. Activate the virtual environment FIRST
-source beta_venv/bin/activate
+export SEED=64
 
 
-# 3. Now use Ray (it will use the healthy version inside beta_venv)
 ray stop --force
 pkill -f "ray"
 ray start --head --num-gpus=4
 
 unset ROCR_VISIBLE_DEVICES
- 
+
 PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=maxrl \
-    data.train_files=$HOME/data/polaris/train.parquet \
-    data.val_files=$"['$HOME/data/aime24/test.parquet','$HOME/data/aime25/test.parquet','$HOME/data/math-500/test.parquet']" \
+    algorithm.adv_estimator=multi_attempt_grpo \
+    data.train_files=$HOME/data/gsm8k/train.parquet \
+    data.val_files=$HOME/data/gsm8k-platinum/test.parquet \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    data.train_batch_size=256 \
+    data.train_batch_size=64 \
     data.max_prompt_length=$PROMPT_LEN \
     data.max_response_length=$RESPONSE_LEN \
     data.seed=$SEED \
-    custom_reward_function.path=$(pwd)/src/decay_reward.py \
-    custom_reward_function.name=compute_decay_reward \
+    custom_reward_function.path=$(pwd)/src/multi_attempt_reward.py \
+    custom_reward_function.name=compute_reward \
     reward.reward_manager.name=naive \
     reward.num_workers=8 \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -91,9 +64,10 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     ++actor_rollout_ref.max_model_len=$((PROMPT_LEN + RESPONSE_LEN)) \
     ++actor_rollout_ref.rollout.free_cache_engine=True \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm.enable_sleep_mode=False \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
+    actor_rollout_ref.rollout.temperature=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=$ROLLOUT_NUM \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.strategy=fsdp2 \
     actor_rollout_ref.actor.loss_agg_mode=token-mean \
@@ -107,9 +81,10 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     trainer.log_val_generations=128 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name=r-grpo_train \
-    trainer.experiment_name=qwen3-4b_maxrl_rollout${ROLLOUT_NUM}_response${RESPONSE_LEN}_seed${SEED} \
-    trainer.total_epochs=5 \
+    trainer.experiment_name=qwen0.6b_baseline_rollout${ROLLOUT_NUM}_response${RESPONSE_LEN}_temp0.6_seed${SEED} \
+    trainer.total_epochs=10 \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.agent.agent_loop_config_path=$(pwd)/src/custom_agents.yaml \
     ++actor_rollout_ref.rollout.agent.default_agent_loop=multi_attempt \
-    2>&1 | tee verl_demo.log
+    2>&1 | tee verl.log
+

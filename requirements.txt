@@ -11,3 +11,4 @@ transformers>=5.8.0
 vllm>=0.17.0
 
 math_verify
+liger-kernel

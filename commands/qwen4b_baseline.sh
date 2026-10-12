@@ -1,5 +1,10 @@
+#!/bin/bash
+
 export PROJECT_ROOT=$(pwd)
 export PYTHONPATH=$(pwd)/src:$PYTHONPATH
+
+source venv/bin/activate
+
 
 export MODEL_PATH="Qwen/Qwen3-4B-Base"
 export MAX_ATTEMPTS=1
@@ -14,10 +19,11 @@ export SEED=8
 
 ray stop --force
 pkill -f "ray"
+ray start --head --num-gpus=4
 
 unset ROCR_VISIBLE_DEVICES
 
-PYTHONUNBUFFERED=1 python3.10 -m verl.trainer.main_ppo \
+PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=multi_attempt_grpo \
     data.train_files=$HOME/data/polaris/train.parquet \
     data.val_files=$"['$HOME/data/aime24/test.parquet','$HOME/data/aime25/test.parquet','$HOME/data/math-500/test.parquet']" \
@@ -27,8 +33,8 @@ PYTHONUNBUFFERED=1 python3.10 -m verl.trainer.main_ppo \
     data.max_prompt_length=$PROMPT_LEN \
     data.max_response_length=$RESPONSE_LEN \
     data.seed=$SEED \
-    custom_reward_function.path=$(pwd)/src/decay_reward.py \
-    custom_reward_function.name=compute_decay_reward \
+    custom_reward_function.path=$(pwd)/src/multi_attempt_reward.py \
+    custom_reward_function.name=compute_reward \
     reward.reward_manager.name=naive \
     reward.num_workers=8 \
     actor_rollout_ref.model.path=$MODEL_PATH \
@@ -78,6 +84,6 @@ PYTHONUNBUFFERED=1 python3.10 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.agent.agent_loop_config_path=$(pwd)/src/custom_agents.yaml \
     ++actor_rollout_ref.rollout.agent.default_agent_loop=multi_attempt \
-    2>&1 | tee verl_demo.log
+    2>&1 | tee verl.log
 
 
