@@ -1,4 +1,5 @@
-from verl.utils.reward_score.math_verify import compute_score as base_compute_score
+from verl.utils.reward_score.math_verify import compute_score as math_verify_score
+
 
 def compute_score(data_source, solution_str, ground_truth, extra_info=None):
     try:

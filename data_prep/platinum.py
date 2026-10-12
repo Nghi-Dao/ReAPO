@@ -6,8 +6,6 @@ def prepare_platinum_data():
     # Load the platinum test set
     ds = load_dataset("madrylab/gsm8k-platinum", split="test")
 
-    # Match the system prompt used in training
-    system_prompt = "You are a helpful AI assistant named SmolLM, trained by Hugging Face"
 
     def process_example(example):
         # Format the prompt just like the MaxRL paper
@@ -19,7 +17,6 @@ def prepare_platinum_data():
         # Format it into the structure verl expects
         return {
             "prompt": [
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
             ], 
             "reward_model": {"ground_truth": answer},
