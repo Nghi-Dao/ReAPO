@@ -30,7 +30,7 @@ With `MAX_ATTEMPTS=1` the estimator reduces to GRPO with a binary reward, which 
 ```bash
 git clone https://github.com/Nghi-Dao/ReAPO.git
 cd ReAPO
-python -m venv venv && source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 
 cd verl
 bash scripts/install_vllm_sglang_mcore.sh
