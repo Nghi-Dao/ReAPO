@@ -39,8 +39,6 @@ pip install --no-deps -e .
 cd ..
 
 pip install -r requirements.txt     
-pip install flash-attn --no-build-isolation
-wandb login                         
 ```
 
 ## Data

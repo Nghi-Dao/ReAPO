@@ -2,13 +2,11 @@
 PyYAML
 wandb
 
-# Core Machine Learning & Arrays
-numpy<2.0.0
 
 datasets>=4.0.0
 transformers>=5.8.0
 
-vllm>=0.17.0
+# vllm==0.26.0
 
 math_verify
 liger-kernel
