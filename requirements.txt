@@ -1,0 +1,8 @@
+transformers>=4.56,<5
+numpy>=2.0,<2.3
+ 
+datasets>=4.0.0
+PyYAML
+wandb
+math_verify
+liger-kernel
